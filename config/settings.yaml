@@ -1,0 +1,175 @@
+# Trading bot settings. Every tunable lives here; code holds no magic numbers.
+# ⚠ = default risk limit approved 2026-10-11; changing one needs the owner's sign-off.
+
+mode: paper                  # live ALSO needs --env live (or TRADING_ENV=live) + ENABLE_LIVE_TRADING=yes
+base_currency: CAD
+
+alpaca:
+  endpoints:                 # the only place the trading endpoints are defined
+    paper: https://paper-api.alpaca.markets
+    live: https://api.alpaca.markets      # keys come only from env: ALPACA_{PAPER|LIVE}_{KEY|SECRET}
+
+paths:
+  bars: data/bars            # Parquet cache: <asset_class>/<timeframe>/<symbol>.parquet
+  news_db: data/news.sqlite  # news archive + sentiment scores (research data, shared by all environments)
+  db: state/{env}.sqlite     # trading state; paper and live never share a ledger
+  logs: logs/bot.jsonl
+  reports: reports
+
+data:
+  overlap_bars: 10               # each update re-reads this many cached bars; if their closes moved
+  adjustment_tolerance: 0.0005   #   by more than this (new split/dividend adjustment) -> full refetch
+  flag_daily_move: 0.25          # |1-day return| above this is flagged for review
+  max_gap_days: 7                # a longer hole between bars = not tradable then; history before it is unusable
+  fx: {source: bank_of_canada, series: FXUSDCAD}
+
+asset_classes:
+  tsx:
+    currency: CAD
+    capital_cad: 100000      # backtest starting capital + SimulatedBroker opening cash
+    history_years: 5         # analysis/quality window; the full history is cached
+    min_history_years: 5     # symbols with less available history are dropped and reported
+    data: bot.data.tsx_yfinance:YFinanceTSX
+    broker: bot.execution.brokers.simulated:SimulatedBroker
+    symbols: [XIU.TO, XEG.TO, XFN.TO, RY.TO, TD.TO, BNS.TO, BMO.TO, ENB.TO, CNQ.TO,
+              SU.TO, CNR.TO, SHOP.TO, ATD.TO, BCE.TO, TRP.TO, FNV.TO, ABX.TO, NTR.TO]
+    session: {open: "09:30", close: "16:00", tz: America/Toronto}
+    decide_at: {time: "17:30", tz: America/Toronto}
+    strategies:              # a new strategy = a new file in bot/strategies/ + an entry here
+      - class: bot.strategies.sma_trend:SmaTrend
+        weight: 1.0          # blend weight if several strategies share an asset class
+        timeframe: 1D
+        holding_period_days: [10, 120]    # swing; reports compare with the realised average
+        params: {fast: 50, slow: 200, momentum: 63}
+        walk_forward_grid: {fast: [20, 50], slow: [100, 200], momentum: [63, 126]}
+        order_type: limit    # market orders are an explicit opt-in
+    walk_forward: {in_sample_months: 24, out_of_sample_months: 6, objective: sharpe}
+    orders:
+      time_in_force: day
+      limit_offset_bps: {entry: 100, exit: 300}   # vs last close; unfilled if next open is beyond it
+    costs:
+      commission: {per_share: 0.01, min_per_order: 1.00}   # CAD, IBKR Canada fixed
+      slippage_bps: 10
+      max_volume_participation: 0.05
+    rules:
+      tick: [{from_price: 0.50, size: 0.01}, {from_price: 0, size: 0.005}]      # UMIR 6.1
+      board_lot: [{from_price: 1.00, size: 100}, {from_price: 0.10, size: 500}, {from_price: 0, size: 1000}]
+      lot_policy: whole_shares   # odd lots fill-or-kill at the NBBO; board lots kept for validation
+    risk:
+      risk_per_trade: 0.01                    # ⚠ equity lost if the stop is hit
+      atr_period: 14
+      stop_atr_multiple: 3.0                  # ⚠
+      max_position: {pct_equity: 0.10, cad: null}   # ⚠ either or both; the tighter wins
+      max_positions: 10                       # ⚠
+      max_gross_exposure: 0.95                # ⚠ before the regime cap
+      max_open_orders: 20                     # ⚠
+      max_daily_loss: 0.03                    # ⚠ vs previous cycle's equity; blocks new entries
+      min_order_cad: 500                      # ⚠
+      rebalance_band: 0.02                    # trims smaller than this share of equity are skipped
+  crypto:
+    currency: USD
+    capital_cad: 25000       # backtest only; paper trading uses the Alpaca paper balance
+    history_years: null      # use all available history (Alpaca crypto bars start 2021-01-01)
+    min_history_years: 3
+    data: bot.data.crypto_alpaca:AlpacaCrypto
+    broker: bot.execution.brokers.alpaca:AlpacaBroker
+    # SOL/USD is auto-dropped (owner's choice, 2026-10-11): no Alpaca bars 2023-07-08..2024-08-26, so its
+    # usable history is < min_history_years; the data rule re-admits it only once that is no longer true.
+    symbols: [BTC/USD, ETH/USD, SOL/USD]
+    decide_at: {time: "00:05", tz: UTC}   # Alpaca 1Day bars close at 00:00 UTC (verified 2026-10-11)
+    strategies:
+      - class: bot.strategies.sma_trend:SmaTrend
+        weight: 1.0
+        timeframe: 1D
+        holding_period_days: [10, 120]
+        params: {fast: 50, slow: 200, momentum: 63}
+        walk_forward_grid: {fast: [20, 50], slow: [100, 200], momentum: [63, 126]}
+        order_type: limit
+    walk_forward: {in_sample_months: 24, out_of_sample_months: 6, objective: sharpe}
+    orders:
+      time_in_force: ioc     # Alpaca crypto allows gtc|ioc; ioc leaves no stale orders, like the backtest
+      limit_offset_bps: {entry: 25, exit: 100}   # vs live ask/bid
+    costs:
+      fee_bps: {maker: 15, taker: 25}        # Alpaca tier 1 (< $100k 30-day volume)
+      charge: taker                          # conservative: every fill pays taker
+      slippage_bps: 15
+      max_volume_participation: 0.05
+    rules: {qty_step: 0.0001}  # backtest sizing; the Alpaca adapter applies each pair's live increments
+    risk:
+      risk_per_trade: 0.01                    # ⚠
+      atr_period: 14
+      stop_atr_multiple: 3.0                  # ⚠
+      max_position: {pct_equity: 0.40, cad: null}   # ⚠
+      max_positions: 3                        # ⚠
+      max_gross_exposure: 0.95                # ⚠
+      max_open_orders: 6                      # ⚠
+      max_daily_loss: 0.06                    # ⚠ crypto moves ~2-3x more per day than TSX
+      min_order_cad: 50                       # ⚠
+      rebalance_band: 0.02
+
+combined_risk: {max_gross_exposure: 0.95, max_open_orders: 25}   # ⚠ measured in CAD
+
+fusion:
+  sentiment_veto_below: -0.30      # blocks NEW entries only...
+  sentiment_veto_min_articles: 3   # ...and only with enough coverage
+  sentiment_scale_max: 1.25        # positive sentiment scales entry size up to this
+  sentiment_scale_full_at: 0.50    # linear: score 0 -> 1.0x, score >= 0.50 -> 1.25x
+  sentiment_min_articles: 3        # fewer -> neutral (1.0x, no veto)
+
+sentiment:
+  enabled: true                    # backtest --sentiment on|off overrides this
+  lookback_hours: 72
+  half_life_hours: 24
+  dedupe_jaccard: 0.8              # near-identical headlines collapse to the earliest
+  scorer: {class: bot.sentiment.scoring.finbert:FinBert, model: ProsusAI/finbert, device: cpu, batch_size: 16}
+  sources:
+    - class: bot.sentiment.sources.alpaca_news:AlpacaNews
+      asset_class: crypto
+      point_in_time_history: true  # vendor publish timestamps; reports label it "vendor-archived"
+      history_start: "2021-01-01"  # first backfill starts here (Alpaca crypto bars start 2021-01-01)
+    - class: bot.sentiment.sources.canada_rss:CanadaRss
+      asset_class: tsx
+      point_in_time_history: false # only first-seen counts; never backfilled
+      names:
+        XIU.TO: iShares S&P/TSX 60 Index ETF
+        XEG.TO: iShares S&P/TSX Capped Energy Index ETF
+        XFN.TO: iShares S&P/TSX Capped Financials Index ETF
+        RY.TO: Royal Bank of Canada
+        TD.TO: Toronto-Dominion Bank
+        BNS.TO: Scotiabank
+        BMO.TO: Bank of Montreal
+        ENB.TO: Enbridge
+        CNQ.TO: Canadian Natural Resources
+        SU.TO: Suncor Energy
+        CNR.TO: Canadian National Railway
+        SHOP.TO: Shopify
+        ATD.TO: Alimentation Couche-Tard
+        BCE.TO: BCE Inc
+        TRP.TO: TC Energy
+        FNV.TO: Franco-Nevada
+        ABX.TO: Barrick
+        NTR.TO: Nutrien
+      macro_queries: [Bank of Canada, Canada inflation, Canada interest rates, Canadian economy, TSX]
+      feeds: [https://www.bankofcanada.ca/content_type/press-releases/feed/]   # tagged MACRO
+    - class: bot.sentiment.sources.reddit:Reddit   # stub, raises NotImplementedError
+      enabled: false
+
+regime:
+  equity_proxy: XIU.TO
+  crypto_proxy: BTC/USD
+  trend_sma: 200
+  vol_window: 20
+  vol_median_window: 252
+  vol_elevated_ratio: 1.5
+  macro: {bullish_at: 0.20, bearish_at: -0.20, min_articles: 5, lookback_hours: 168}
+  risk_on_at: 2                    # score >= 2 -> RISK_ON; <= -2 -> RISK_OFF; else NEUTRAL
+  risk_off_at: -2
+  gross_caps: {RISK_ON: 1.00, NEUTRAL: 0.60, RISK_OFF: 0.25}   # per asset class
+
+backtest:
+  cost_multipliers: [1.0, 2.0]
+  risk_free_rate: 0.0
+  benchmarks: [XIU.TO, BTC/USD, equal_weight]
+
+killswitch: {order_type: market}   # explicit opt-in: flatten as fast as possible
+logging: {level: INFO}

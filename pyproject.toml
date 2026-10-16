@@ -1,0 +1,30 @@
+[project]
+name = "trading-bot"
+version = "0.1.0"
+description = "Research-grade paper-trading and backtesting bot for TSX and crypto"
+requires-python = ">=3.12,<3.14"
+# Only the dependencies approved for this project; exact versions are pinned in uv.lock.
+dependencies = [
+    "alpaca-py",
+    "yfinance",
+    "pandas>=2.2",
+    "numpy",
+    "pyarrow",
+    "pydantic>=2",
+    "pyyaml",
+    "python-dotenv",
+    "feedparser",
+    "transformers",
+    "torch",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

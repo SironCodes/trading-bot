@@ -1,0 +1,10 @@
+.env
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# runtime data, anchored to the repo root so bot/data/ (source code) stays tracked
+/data/
+/state/
+/logs/
